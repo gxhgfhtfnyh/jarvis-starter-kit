@@ -58,3 +58,12 @@ def test_approval_evidence_never_approves_when_owner_not_configured(tmp_path, mo
     assert result is None
 
 
+
+
+def test_writing_discord_config_is_flagged_as_gate_tamper():
+    """Security review finding (2026-11-18): owner_id lives in logs/discord_config.json now, so that file must be
+    as protected as the gate's other own files -- otherwise an agent could silently repoint owner_id at itself
+    (or an attacker) and approve its own sends."""
+    cls = sg.classify("Bash", {"command": "echo '{\"owner_id\": 1}' > logs/discord_config.json"})
+    assert cls["kind"] == "gate_tamper"
+    assert cls["external"] is True
