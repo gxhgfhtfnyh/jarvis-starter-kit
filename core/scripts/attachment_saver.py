@@ -34,9 +34,16 @@ def save_attachments(message_id, dest_dir=DEFAULT_DEST):
                     userId="me", messageId=message_id, id=body["attachmentId"]
                 ).execute()
                 data = base64.urlsafe_b64decode(att["data"])
-                safe_name = Path(filename).name  # sender-supplied filename, never trust path segments ("..") in it
+                # Security review 2026-11-18: an attacker-controlled filename (the sender picks it) must never
+                # escape dest_dir or write to an NTFS alternate data stream. .name already drops directory
+                # components, but an empty/"."/".." name collapses to dest_dir itself, and a bare ':' addresses
+                # a stream on the real file rather than naming a new one -- both are refused outright.
+                safe_name = Path(filename).name
+                if not safe_name or safe_name in (".", "..") or ":" in safe_name:
+                    raise ValueError("attachment filename %r is not a safe plain filename, refusing to write" % filename)
+                dest_root = dest_dir.resolve()
                 out_path = (dest_dir / safe_name).resolve()
-                if dest_dir.resolve() not in out_path.parents and out_path != dest_dir.resolve():
+                if out_path.parent != dest_root:
                     raise ValueError("attachment filename %r resolves outside %s, refusing to write" % (filename, dest_dir))
                 if out_path.exists():
                     stem, suffix = out_path.stem, out_path.suffix
@@ -44,7 +51,16 @@ def save_attachments(message_id, dest_dir=DEFAULT_DEST):
                     while out_path.exists():
                         out_path = out_path.with_name("%s (%d)%s" % (stem, n, suffix))
                         n += 1
+                    if out_path.parent != dest_root:   # the rename loop only changes the final component, but verify again rather than trust it
+                        raise ValueError("attachment filename %r resolves outside %s, refusing to write" % (filename, dest_dir))
                 out_path.write_bytes(data)
+                # Mark-of-the-Web: this came from an external, untrusted source (an email attachment), so
+                # Windows must treat it as such (SmartScreen, Office Protected View, etc.), not as a fully
+                # trusted local file. Best-effort only -- not every filesystem/mount supports ADS.
+                try:
+                    Path(str(out_path) + ":Zone.Identifier").write_text("[ZoneTransfer]\r\nZoneId=3\r\n", encoding="utf-8")
+                except OSError:
+                    pass
                 saved.append(str(out_path))
             if part.get("parts"):
                 _walk(part["parts"])

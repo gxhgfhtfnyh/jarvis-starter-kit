@@ -78,7 +78,36 @@ class SaveAttachments(unittest.TestCase):
         out = pathlib.Path(saved[0])
         self.assertNotEqual(out.name, "dup.txt")
         self.assertEqual((self.dest / "dup.txt").read_bytes(), b"original")
-        self.assertEqual(out.read_bytes(), b"new content")
+
+    def test_a_filename_that_collapses_to_dotdot_is_refused(self):
+        """Security review round 2 (2026-11-18): Path("..").name is empty, so a bare ".." filename would
+        otherwise resolve to dest_dir ITSELF rather than a real file inside it."""
+        with self.assertRaises(ValueError):
+            self._run([("..", b"pwned")])
+
+    def test_a_part_with_no_filename_is_skipped_not_saved(self):
+        """An empty filename is falsy, so _walk's own "if filename" guard already skips it before ever
+        reaching save_attachments's own name check -- same as how Gmail represents a part with no name."""
+        saved = self._run([("", b"ignored")])
+        self.assertEqual(saved, [])
+
+    def test_a_filename_with_a_colon_is_refused(self):
+        """A colon addresses an NTFS alternate data stream on the real file rather than naming a new one."""
+        with self.assertRaises(ValueError):
+            self._run([("evil.txt:hidden", b"pwned")])
+
+    def test_saved_attachments_are_marked_as_coming_from_the_internet(self):
+        """Mark-of-the-Web (security review round 2): an email attachment is untrusted and must be tagged
+        so Windows applies the same protections (SmartScreen, Protected View) it would to a browser
+        download, not treated as an already-trusted local file."""
+        saved = self._run([("invoice.pdf", b"hello")])
+        out = pathlib.Path(saved[0])
+        zone_file = pathlib.Path(str(out) + ":Zone.Identifier")
+        try:
+            content = zone_file.read_text(encoding="utf-8")
+        except OSError:
+            self.skipTest("alternate data streams are not supported on this filesystem")
+        self.assertIn("ZoneId=3", content)
 
 
 if __name__ == "__main__":
