@@ -319,20 +319,23 @@ class TestDecide:
 
 
 class TestApprovalEvidence:
-    def test_a_real_yes_after_the_hold_is_evidence(self):
+    def test_a_real_yes_after_the_hold_is_evidence(self, monkeypatch):
+        monkeypatch.setattr(dg, "THE_OWNER_ID", 5551234567890123456)
         dms = [{"author_id": dg.THE_OWNER_ID, "source": "dm", "date": "2026-11-06T11:10:00", "text": "yes", "id": 1}]
         since = dg.dt.datetime(2026, 11, 6, 11, 0, 0).timestamp()
         now = dg.dt.datetime(2026, 11, 6, 11, 20, 0).timestamp()
         ev = dg.approval_evidence(dms, since, now)
         assert ev is not None and ev["id"] == 1
 
-    def test_a_yes_before_the_hold_does_not_count(self):
+    def test_a_yes_before_the_hold_does_not_count(self, monkeypatch):
+        monkeypatch.setattr(dg, "THE_OWNER_ID", 5551234567890123456)
         dms = [{"author_id": dg.THE_OWNER_ID, "source": "dm", "date": "2026-11-06T10:00:00", "text": "yes", "id": 1}]
         since = dg.dt.datetime(2026, 11, 6, 11, 0, 0).timestamp()
         now = dg.dt.datetime(2026, 11, 6, 11, 20, 0).timestamp()
         assert dg.approval_evidence(dms, since, now) is None
 
-    def test_a_question_is_not_a_yes(self):
+    def test_a_question_is_not_a_yes(self, monkeypatch):
+        monkeypatch.setattr(dg, "THE_OWNER_ID", 5551234567890123456)
         dms = [{"author_id": dg.THE_OWNER_ID, "source": "dm", "date": "2026-11-06T11:10:00", "text": "are you sure?", "id": 1}]
         since = dg.dt.datetime(2026, 11, 6, 11, 0, 0).timestamp()
         now = dg.dt.datetime(2026, 11, 6, 11, 20, 0).timestamp()

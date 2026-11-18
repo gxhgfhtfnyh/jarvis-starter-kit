@@ -37,7 +37,10 @@ never consume each other's yes.
     python delete_gate_hook.py approve --text "<the exact command>"      # after his yes
     python delete_gate_hook.py approve-last                              # approve the most recent held call
     python delete_gate_hook.py report                                    # what shadow mode saw
-Registration (PreToolUse): matcher "Bash|PowerShell", command: python "J:\\Jarvis2\\scripts\\delete_gate_hook.py"
+Registration (PreToolUse): matcher "Bash|PowerShell|Write|Edit|NotebookEdit" (security review 2026-11-18: classify()
+already treats a direct Write/Edit/NotebookEdit onto one of PROTECTED_NAMES as gate_tamper -- that branch is dead
+unless the hook is actually registered on those tool names too, not just Bash|PowerShell), command: python
+"<this script's own path>"
 Pure core (unit tested): classify(tool_name, tool_input), content_hash(text), decide(cls, hashes, mode, call_hash),
 valid_approvals(rows, used_rows, now), approval_evidence(dms, since, now, used)."""
 import datetime as dt
@@ -72,7 +75,10 @@ MAX_COMMAND = 40000
 # its own evidence trail.
 RX_TAMPER = re.compile(r"delete_approvals(?:_used)?\.jsonl|delete_gate_off\.txt|delete_gate_mode\.txt|delete_gate\.jsonl|discord_incoming\.jsonl", re.I)
 WRITER_CMDS = frozenset(("tee", "rm", "del", "mv", "move", "cp", "copy", "truncate", "remove-item", "set-content",
-                         "add-content", "out-file", "new-item", "clear-content", "ri", "erase", "rd", "rmdir", "ren", "rename"))
+                         "add-content", "out-file", "new-item", "clear-content", "ri", "erase", "rd", "rmdir", "ren", "rename",
+                         # security review 2026-11-18: common short PowerShell aliases and plain creation verbs that
+                         # could write/touch a protected file without matching any of the names above
+                         "touch", "mkdir", "md", "ni", "sc", "ac", "cpi", "mi", "rni"))
 RX_REDIRECT_INTO = re.compile(r">>?\s*[\"']?\S*(?:delete_approvals(?:_used)?\.jsonl|delete_gate_off\.txt|delete_gate_mode\.txt|delete_gate\.jsonl|discord_incoming\.jsonl)", re.I)
 RX_PY_WRITE = re.compile(r"open\([^)]*['\"][wax]|\.write\(|write_text|write_bytes|\.append\(|os\.(?:remove|replace|rename)|shutil\.", re.I)
 RX_SCRATCH = re.compile(r"AppData[\\/]+Local[\\/]+Temp[\\/]+claude|[\\/]tmp[\\/]+claude", re.I)
@@ -194,7 +200,13 @@ def _command_word(tokens):
 
 
 def _is_scratch_path(p):
-    return bool(RX_SCRATCH.search(p or ""))
+    """Security review 2026-11-18: match against the NORMALIZED path, not the raw string -- a raw substring
+    search would let `.../Temp/claude/../../../real/target` through as "scratch" even though the actual
+    resolved path escapes the scratch directory entirely (normpath collapses the `..` segments, which breaks
+    the exact AppData/Local/Temp/claude sequence RX_SCRATCH requires, so an escaping path no longer matches)."""
+    if not p:
+        return False
+    return bool(RX_SCRATCH.search(os.path.normpath(p)))
 
 
 def _self_created(full, path):
@@ -435,9 +447,28 @@ def decide(cls, hashes, mode, call_hash):
     return "would_block", cls["why"]
 
 
-def approval_evidence(dms, since, now, used=None):
-    """Pure. The newest DM from the owner himself that arrived after `since` (epoch) and says yes."""
+SHORT_CODE_LEN = 6   # same scheme and length as send_gate_hook.py's short_code()
+APPROVAL_CODE_WINDOW = 15 * 60      # a code found in a DM more than 15 min after the hold does not count, even though it is the right code
+
+
+def short_code(content_hash_hex):
+    """Pure. The hex code shown to him for one specific held call -- security review 2026-11-18: a generic "yes"
+    was bound only by arrival time, never by whether the yes was actually about THIS held command, so an
+    unrelated yes-shaped DM sent after the hold could get spent approving it. Requiring this code in his reply
+    ties the approval to the exact content, not just to timing (same fix send_gate_hook.py already has)."""
+    return (content_hash_hex or "")[:SHORT_CODE_LEN]
+
+
+def approval_evidence(dms, since, now, used=None, code=None, deadline=None):
+    """Pure. The newest DM from the owner himself that arrived after `since` (epoch) and approves. When `code`
+    is given, the message must contain that exact code as a whole word -- a plain "yes" no longer counts, since
+    the code is what binds the approval to this specific held call. `deadline` additionally caps how late a
+    correct code may still count. Falls back to the old generic yes-shaped-phrase match when `code` is None."""
+    if THE_OWNER_ID is None:   # security review 2026-11-18: never guess who "the owner" is -- fail closed until configured
+        return None
     best = None
+    code_rx = re.compile(r"\b%s\b" % re.escape(code), re.I) if code else None
+    cap = min(now, deadline) if deadline is not None else now
     for m in dms or []:
         if m.get("author_id") != THE_OWNER_ID or m.get("source") != "dm":
             continue
@@ -447,7 +478,8 @@ def approval_evidence(dms, since, now, used=None):
             continue
         text = (m.get("text") or "").strip()
         negated = re.search(r"\b(no|nope|not|don'?t|dont|do not|never|stop|wait|hold|cancel|unsure|sure\?)\b", text, re.I) or "?" in text
-        if since < t <= now and APPROVE_RX.search(text) and not negated and m.get("id") not in (used or ()):
+        matches = bool(code_rx.search(text)) if code_rx else bool(APPROVE_RX.search(text))
+        if since < t <= cap and matches and not negated and m.get("id") not in (used or ()):
             if best is None or t > best[0]:
                 best = (t, m)
     return best[1] if best else None
@@ -517,7 +549,8 @@ def run(payload, logs=None, now=None):
           "hash": h, "head": " ".join(str(text).split())[:120]}, logs)
     if decision == "block":
         return 2, ("delete_gate: this looks like a destructive, hard-to-reverse filesystem action (%s: %s) and no approval exists for this exact content. "
-                   "Show him the exact text and wait for his go-ahead; his yes in Discord is what records the approval." % (cls["kind"], why))
+                   "Show him the exact text and ask him to reply with the code %s (a plain \"yes\" is not enough -- it must contain this exact code, "
+                   "which is what ties his approval to this specific content rather than just to timing)." % (cls["kind"], why, short_code(h)))
     return 0, ""
 
 
@@ -549,6 +582,7 @@ def _cli_approve(argv, logs=None, now=None):
         except (KeyError, ValueError):
             return 4
         head = text
+        the_hash = mine[-1]["hash"]
     else:
         held = [r for r in _read(LOG, logs) if r.get("decision") in ("block", "would_block")]
         if not held:
@@ -556,9 +590,12 @@ def _cli_approve(argv, logs=None, now=None):
             return 1
         since = time.mktime(time.strptime(held[-1]["ts"], "%Y-%m-%dT%H:%M:%S"))
         head = None
-    ev = approval_evidence(_read(INCOMING, logs), since, now, used={r.get("by_msg") for r in _read(APPROVALS, logs) if r.get("by_msg")})
+        the_hash = held[-1]["hash"]
+    code = short_code(the_hash)
+    ev = approval_evidence(_read(INCOMING, logs), since, now, used={r.get("by_msg") for r in _read(APPROVALS, logs) if r.get("by_msg")},
+                            code=code, deadline=since + APPROVAL_CODE_WINDOW)
     if ev is None:
-        print("no go-ahead from the owner found after the hold; nothing recorded")
+        print("no go-ahead from the owner found with the code %s within %d minutes of the hold; nothing recorded" % (code, APPROVAL_CODE_WINDOW // 60))
         return 3
     if head is not None:
         row = approve(head, "the owner", logs, by_msg=ev.get("id"))
