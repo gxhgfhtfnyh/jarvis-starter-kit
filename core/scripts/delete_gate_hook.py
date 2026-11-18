@@ -86,8 +86,10 @@ WRITER_CMDS = frozenset(("tee", "rm", "del", "mv", "move", "cp", "copy", "trunca
 # more alias). For a statement that already names a protected file (RX_TAMPER matched), invert the check instead:
 # treat it as tamper unless the command word is on this short, genuinely read-only allowlist -- anything else
 # (a command this allowlist has never heard of, including a brand-new alias) is tamper by default.
-READ_ONLY_CMDS = frozenset(("cat", "type", "get-content", "gc", "head", "tail", "less", "more",
+READ_ONLY_CMDS = frozenset(("cat", "type", "get-content", "gc", "head", "tail",
                             "grep", "select-string", "sls", "findstr", "wc", "ls", "dir", "get-childitem", "gci"))
+# security review 2026-11-18 (round 3): less/more were dropped -- both have interactive shell-escape
+# features ("!<command>" from inside the pager), so "read-only" was not actually true of them
 RX_REDIRECT_INTO = re.compile(r">>?\s*[\"']?\S*(?:delete_approvals(?:_used)?\.jsonl|delete_gate_off\.txt|delete_gate_mode\.txt|delete_gate\.jsonl|discord_incoming\.jsonl)", re.I)
 RX_PY_WRITE = re.compile(r"open\([^)]*['\"][wax]|\.write\(|write_text|write_bytes|\.append\(|os\.(?:remove|replace|rename)|shutil\.", re.I)
 RX_SCRATCH = re.compile(r"AppData[\\/]+Local[\\/]+Temp[\\/]+claude|[\\/]tmp[\\/]+claude", re.I)
@@ -333,15 +335,25 @@ def _is_tamper(full):
     a WILDCARD or a VARIABLE rather than one of the literal protected names (`rm logs/delete_*`,
     `echo x >> $LOGS_DIR/discord_incoming.jsonl`) -- those would not match the exact filenames above."""
     if RX_TAMPER.search(full):
+        # round 3 (2026-11-18): judge the WHOLE command, not the one segment that happens to name the
+        # file -- a pipe/chain can do its real writing in a different segment than the one that names
+        # the protected file (`echo discord_incoming.jsonl | xargs tee`), so a protected name ANYWHERE
+        # requires EVERY segment to be read-only, and any bare `>` anywhere is enough to refuse, not
+        # just one matching the exact redirect-target pattern.
+        if ">" in full:
+            return True
         for stmt in _split_unquoted(full):
-            if not RX_TAMPER.search(stmt):
+            if not stmt:
                 continue
+            if re.match(r"^[A-Za-z_]\w*=", stmt) or re.search(r"\benv\s+[A-Za-z_]\w*=", stmt):
+                return True   # an env-assignment prefix changes behavior in ways this check cannot verify
             tokens = _tokens(stmt)
-            base, _i = _command_word(tokens)
-            # deny-by-default (security review 2026-11-18 round 2): a statement that already names a
-            # protected file is tamper unless its command word is known, read-only, AND there is no
-            # redirect -- an unrecognized command (including one no reviewer has named yet) is tamper too
-            if RX_REDIRECT_INTO.search(stmt) or base not in READ_ONLY_CMDS:
+            if not tokens:
+                continue
+            word = tokens[0]
+            # a bare, lowercase name only -- no path separators, no leading '.', no '.exe': a program
+            # merely NAMED "cat" via a weird path, or found through a wrapper, does not get the pass
+            if re.search(r"[\\/]", word) or word.startswith(".") or word.lower() not in READ_ONLY_CMDS:
                 return True
         for blk in _python_blocks(full):
             if RX_TAMPER.search(blk) and RX_PY_WRITE.search(blk):

@@ -40,6 +40,36 @@ def test_a_genuinely_read_only_command_on_a_protected_file_is_not_tamper():
     assert dg._is_tamper(r"grep enforce logs/delete_gate_mode.txt") is False
 
 
+def test_round_3_a_pipe_that_writes_in_a_later_segment_is_tamper():
+    """The protected name can appear in one pipe segment while the real write happens in another."""
+    assert dg._is_tamper(r"echo discord_incoming.jsonl | xargs -I{} tee {}") is True
+
+
+def test_round_3_every_segment_of_a_tampering_chain_must_be_read_only():
+    assert dg._is_tamper(r"cat delete_gate_off.txt && touch delete_gate_off.txt") is True
+
+
+def test_round_3_an_env_assignment_prefix_on_a_tampering_statement_is_tamper():
+    assert dg._is_tamper(r"FOO=bar cat delete_gate_off.txt") is True
+    assert dg._is_tamper(r"env FOO=bar cat delete_gate_off.txt") is True
+
+
+def test_round_3_a_path_prefixed_or_dotted_command_name_does_not_get_the_read_only_pass():
+    assert dg._is_tamper(r"/weird/path/cat delete_gate_off.txt") is True
+    assert dg._is_tamper(r"./cat delete_gate_off.txt") is True
+
+
+def test_round_3_less_and_more_are_no_longer_treated_as_read_only():
+    assert dg._is_tamper(r"less delete_gate_off.txt") is True
+    assert dg._is_tamper(r"more delete_gate_off.txt") is True
+
+
+def test_round_3_any_bare_redirect_on_a_tampering_statement_is_caught_even_off_pattern():
+    """The old regex required the redirect target to match adjacent to '>'; now any '>' at all on a
+    statement that already names a protected file is enough, regardless of what comes right after it."""
+    assert dg._is_tamper(r'echo x > "some var" discord_incoming.jsonl') is True
+
+
 def test_registration_docstring_now_covers_write_edit_notebookedit():
     assert "Write|Edit|NotebookEdit" in dg.__doc__
 
