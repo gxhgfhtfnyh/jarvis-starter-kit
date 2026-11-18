@@ -67,3 +67,14 @@ def test_writing_discord_config_is_flagged_as_gate_tamper():
     cls = sg.classify("Bash", {"command": "echo '{\"owner_id\": 1}' > logs/discord_config.json"})
     assert cls["kind"] == "gate_tamper"
     assert cls["external"] is True
+
+
+def test_telegram_has_no_standing_exception_logic_left(tmp_path, monkeypatch):
+    """Security review (2026-11-18): the telegram standing-exception check had its own incomplete-fix gap (an
+    abbreviated --reply-to could still disagree between the hypothetical sender script and this regex reader). No
+    telegram sender ships in this kit, so the dead code was removed rather than patched again -- any command naming
+    a telegram_*.py script now always classifies as a plain external send, with no flag parsing and no standing path."""
+    monkeypatch.setattr(sg, "LOGS", str(tmp_path))
+    cls = sg.classify("Bash", {"command": "python telegram_bot_send.py \"hi\" --reply-to 42"})
+    assert cls["external"] is True
+    assert cls["standing"] is False

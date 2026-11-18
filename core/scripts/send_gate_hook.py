@@ -93,13 +93,12 @@ MCP_READ_FIRST = {"list", "get", "search", "read", "fetch", "find", "query", "de
 MCP_SEND_TOKENS = {"send", "post", "publish", "submit", "reply", "comment", "push", "merge", "upload", "tweet", "dm", "email", "notify"}
 UNATTENDED_MUTATE = {"click", "type", "fill", "press", "evaluate", "run", "upload", "drag", "drop", "paste", "shortcut", "clipboard", "powershell", "registry", "process",
                      "filesystem", "multiedit", "multiselect", "app", "handle", "select", "key", "computer", "form", "javascript", "input"}      # browser and desktop tools that act, in a run nobody watches
-# The four sets below are standing exceptions: groups/channels/hosts the owner has explicitly told the assistant it
+# The sets below are standing exceptions: groups/channels/hosts the owner has explicitly told the assistant it
 # never needs to ask about again. This kit ships with none -- a real setup earns these over time from the owner's own
 # words ("go autonomous for that chat", "this is my own machine, stop asking me"), never guessed or assumed. Add your
 # own real ids/hostnames here only after the owner says so explicitly, and keep host matching EXACT (never substring:
 # a substring match on a hostname would also pass "yourhost.evil.com").
 STANDING_CHANNELS = frozenset()   # Discord channel ids the owner has approved for autonomous posting
-TELEGRAM_STANDING_CHATS = frozenset()    # Telegram chat ids (a group, or the owner's own DM chat_id) approved the same way
 RIG_COMPUTE_HOSTS = frozenset()   # hostnames/ips of the owner's own machine(s) that ssh/scp/rsync may reach without asking each time (exact match only)
 NITE_HOSTS = frozenset()   # same idea as RIG_COMPUTE_HOSTS, for a second machine if the owner has one (exact match only)
 RX_DECODE_EXEC = re.compile(r"(?:\beval\b|\|\s*(?:ba|z|da)?sh\b|\|\s*(?:python[0-9.]*|pwsh|powershell)\b|\bsource\s+<\()[^\n]{0,300}\bbase64\s+(?:-d|-D|--decode)\b"
@@ -503,24 +502,13 @@ def _discord_one(stmt, lookup, us, ch, rt):
     return dict(external=False, kind="discord_default", target="owner", standing=True, why="no target flag: goes to the owner")
 
 
-def _telegram_class(stmt):
-    """A Telegram send. A send to the owner's own chat_id or a reply into an approved group is a standing exception like the Discord group; anything else
-    needs approval. telegram_bot_send.py's --reply-to is always <chat_id>[:<message_id>] (the chat_id is required even for a bare DM with no message being
-    replied to), so the colon-and-message-id is optional here. Security review 2026-11-18 (decoy flag): a bare regex search for the first --reply-to in the
-    text could be fooled by an earlier decoy occurrence (inside a quoted message argument, say) -- use _flag_values so every occurrence is read the same way
-    classify() already reads --user/--channel/--reply-to elsewhere, and require EVERY value found to be a standing chat before calling it standing at all."""
-    values = _flag_values(stmt, "reply-to")
-    if not values:
-        return dict(external=True, kind="telegram", target="telegram", standing=False, why="a Telegram send script")
-    chat_ids = []
-    for v in values:
-        m = re.match(r"^(-?\d+)(?::\d+)?$", v)
-        if not m:
-            return dict(external=True, kind="telegram", target="telegram", standing=False, why="a Telegram send script")
-        chat_ids.append(int(m.group(1)))
-    if all(c in TELEGRAM_STANDING_CHATS for c in chat_ids):
-        return dict(external=True, kind="telegram_standing", target=str(chat_ids[0]), standing=True, why="telegram send to the owner's own chat or an approved group")
-    return dict(external=True, kind="telegram", target="telegram", standing=False, why="a Telegram send script")
+# Telegram support was deliberately left out of this kit (2026-11-18): no telegram_*.py script ships here, so there
+# is no real send path to classify. A prior attempt at a --reply-to standing-exception check for it was removed after
+# a security review found the fix itself still had a parser-differential gap (an abbreviated flag on the hypothetical
+# sender script could disagree with this regex-based reader) -- rather than keep patching a check with nothing to
+# protect, the dead code was deleted. If Telegram support is ever added to this kit, give it the same treatment as
+# Discord: a real sender script with allow_abbrev=False, and a classifier here that reads flags the same way, with a
+# test proving an abbreviated flag is rejected, not silently misread.
 
 
 def _mask(text):
@@ -683,8 +671,8 @@ def _classify_stmt(stmt, lookup, depth=0):
         return _none()
     if _runs_script(toks, RX_DISCORD, stmt) or RX_DISCORD_MOD.search(stmt):
         return _discord_class(stmt, lookup)
-    if _runs_script(toks, RX_TELEGRAM, stmt):
-        return _telegram_class(stmt)
+    if _runs_script(toks, RX_TELEGRAM, stmt):     # no telegram sender ships in this kit; a script with this name is unexpected and judged as a plain external send below
+        return dict(external=True, kind="telegram", target="telegram", standing=False, why="a Telegram send script (not part of this kit; treated as external until classified)")
     if RX_MAIL.search(stmt):
         return dict(external=True, kind="mail", target="mail", standing=False, why="mail send")
     if _git_external(toks) or _gh_external(toks):
