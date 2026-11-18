@@ -118,8 +118,9 @@ def main():
     folder = pathlib.Path(r"C:\LocalAI\worker_jobs") / "".join(c if c.isalnum() or c in "-_" else "_" for c in a.name)
     r = route(a.task, code_only=a.code_only, folder=folder)
     LOG.parent.mkdir(parents=True, exist_ok=True)
+    task_for_log = "<redacted: private_boss>" if r.get("answer") == "private_boss" else a.task[:300]
     with LOG.open("a", encoding="utf-8") as f:
-        f.write(json.dumps({"t": time.strftime("%F %T"), "name": a.name, "task": a.task[:300], **r}) + "\n")
+        f.write(json.dumps({"t": time.strftime("%F %T"), "name": a.name, "task": task_for_log, **r}) + "\n")
     print("route:", r["answer"], "confidence", r["confidence"], "via", r["via"])
     local_ok = False
     if r["answer"] == "private_boss":                  # only a private job needs to know whether the local worker is up (an easy job lets worker_run pick the backend)

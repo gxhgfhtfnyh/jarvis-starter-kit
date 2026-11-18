@@ -35,7 +35,16 @@ PATTERNS = {
 # A handful of words that legitimately follow "password:"/"api_key:" in normal
 # documentation prose without being a real leaked secret - keeps the scanner
 # from crying wolf on sentences *about* credentials rather than containing one.
+# Security review 2026-11-18: this must only ever suppress the GENERIC, low-confidence
+# patterns (a bare "password = ..." or "api_key = ..." could really be prose about
+# credentials) -- it must never suppress a specific, high-confidence token FORMAT
+# (an AWS key, a GitHub/Slack/OpenAI/Google token, a private key block), since those
+# are unambiguous regardless of what else is on the same line. Matched as whole words
+# against the full line, not a substring (a real key sitting next to an unrelated word
+# like "reset" must not be hidden just because "set" is a substring of "reset").
+GENERIC_PATTERNS = {"Generic API key assignment", "Generic password assignment", "Bearer token"}
 SAFE_VALUE_WORDS = {"never", "none", "n/a", "not", "keyring", "stored", "set"}
+SAFE_VALUE_RX = re.compile(r"\b(?:%s)\b" % "|".join(re.escape(w) for w in SAFE_VALUE_WORDS), re.IGNORECASE)
 
 
 def scan(root=None, glob_pattern="*.md"):
@@ -64,7 +73,7 @@ def scan(root=None, glob_pattern="*.md"):
                 if line_end == -1:
                     line_end = len(text)
                 full_line = text[line_start:line_end]
-                if any(word in full_line.lower() for word in SAFE_VALUE_WORDS):
+                if label in GENERIC_PATTERNS and SAFE_VALUE_RX.search(full_line):
                     continue
                 # A comment *explaining* the pattern (documentation/examples)
                 # isn't a real secret - same class of false positive as

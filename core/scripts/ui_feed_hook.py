@@ -20,6 +20,25 @@ import sys
 import time
 from pathlib import Path
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+import secret_scanner  # noqa: E402  (reuse the same token-format patterns, one definition of "what a secret looks like")
+
+# Security review 2026-11-18: a logged Edit diff could contain a secret-shaped value with no redaction at all, and
+# a file whose very name says it holds credentials (.env, a key/secret/token file) was logged just like any other.
+SENSITIVE_PATH_RX = re.compile(r"(?:^|[\\/])(\.env(?:\..+)?|.*(?:key|secret|token|credential)s?\.[a-z0-9]+)$", re.I)
+REDACTED = "<redacted>"
+
+
+def _redact_secrets(text):
+    """Pure. Replace any secret-shaped substring (the same formats secret_scanner.py looks for) with a fixed
+    placeholder before logging, so a real diff can still show WHAT changed without leaking the value itself."""
+    for pattern in secret_scanner.PATTERNS.values():
+        text = pattern.sub(REDACTED, text)
+    return text
+
+
 FEED_LOG = Path(os.environ.get("JARVIS_UI_FEED_LOG") or r"J:\Jarvis2\logs\jarvis_ui_feed.jsonl")
 RESULT_LOG = Path(os.environ.get("JARVIS_OP_RESULTS_LOG") or r"J:\Jarvis2\logs\jarvis_op_results.jsonl")
 MAX_DETAIL = 110
@@ -237,7 +256,7 @@ def main():
         return
     tool_input = payload.get("tool_input", {}) or {}
     raw_detail = str(detail_of(tool, tool_input))
-    detail = raw_detail.replace("\n", " ")
+    detail = _redact_secrets(raw_detail.replace("\n", " "))
     if len(detail) > MAX_DETAIL:
         detail = detail[: MAX_DETAIL - 1] + "…"
     entry = {"ts": time.time(), "tool": tool, "detail": detail}
@@ -253,10 +272,10 @@ def main():
     counts = _line_counts(tool, tool_input)
     if counts:
         entry["plus"], entry["minus"] = counts
-    if tool == "Edit":
+    if tool == "Edit" and not (path and SENSITIVE_PATH_RX.search(path)):
         diff = _edit_diff(tool_input)
         if diff:
-            entry["diff"] = diff
+            entry["diff"] = _redact_secrets(diff)
     if tool in ("Bash", "PowerShell") and is_test_command(raw_detail):
         entry["is_test"] = True
     _append_line(FEED_LOG, entry, FEED_ROTATE_BYTES)
