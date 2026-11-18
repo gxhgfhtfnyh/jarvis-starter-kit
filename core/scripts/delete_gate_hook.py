@@ -78,7 +78,16 @@ WRITER_CMDS = frozenset(("tee", "rm", "del", "mv", "move", "cp", "copy", "trunca
                          "add-content", "out-file", "new-item", "clear-content", "ri", "erase", "rd", "rmdir", "ren", "rename",
                          # security review 2026-11-18: common short PowerShell aliases and plain creation verbs that
                          # could write/touch a protected file without matching any of the names above
-                         "touch", "mkdir", "md", "ni", "sc", "ac", "cpi", "mi", "rni"))
+                         "touch", "mkdir", "md", "ni", "sc", "ac", "cpi", "mi", "rni",
+                         # round 2 (2026-11-18): still an allowlist a reviewer could keep finding gaps in --
+                         # copy-item/move-item/rename-item/set-item plus a few more cross-platform writers
+                         "copy-item", "move-item", "rename-item", "set-item", "ln", "install", "dd", "sed"))
+# Security review 2026-11-18 (round 2): enumerating every writer verb is a losing battle (there is always one
+# more alias). For a statement that already names a protected file (RX_TAMPER matched), invert the check instead:
+# treat it as tamper unless the command word is on this short, genuinely read-only allowlist -- anything else
+# (a command this allowlist has never heard of, including a brand-new alias) is tamper by default.
+READ_ONLY_CMDS = frozenset(("cat", "type", "get-content", "gc", "head", "tail", "less", "more",
+                            "grep", "select-string", "sls", "findstr", "wc", "ls", "dir", "get-childitem", "gci"))
 RX_REDIRECT_INTO = re.compile(r">>?\s*[\"']?\S*(?:delete_approvals(?:_used)?\.jsonl|delete_gate_off\.txt|delete_gate_mode\.txt|delete_gate\.jsonl|discord_incoming\.jsonl)", re.I)
 RX_PY_WRITE = re.compile(r"open\([^)]*['\"][wax]|\.write\(|write_text|write_bytes|\.append\(|os\.(?:remove|replace|rename)|shutil\.", re.I)
 RX_SCRATCH = re.compile(r"AppData[\\/]+Local[\\/]+Temp[\\/]+claude|[\\/]tmp[\\/]+claude", re.I)
@@ -329,7 +338,10 @@ def _is_tamper(full):
                 continue
             tokens = _tokens(stmt)
             base, _i = _command_word(tokens)
-            if base in WRITER_CMDS or RX_REDIRECT_INTO.search(stmt):
+            # deny-by-default (security review 2026-11-18 round 2): a statement that already names a
+            # protected file is tamper unless its command word is known, read-only, AND there is no
+            # redirect -- an unrecognized command (including one no reviewer has named yet) is tamper too
+            if RX_REDIRECT_INTO.search(stmt) or base not in READ_ONLY_CMDS:
                 return True
         for blk in _python_blocks(full):
             if RX_TAMPER.search(blk) and RX_PY_WRITE.search(blk):
@@ -455,7 +467,14 @@ def short_code(content_hash_hex):
     """Pure. The hex code shown to him for one specific held call -- security review 2026-11-18: a generic "yes"
     was bound only by arrival time, never by whether the yes was actually about THIS held command, so an
     unrelated yes-shaped DM sent after the hold could get spent approving it. Requiring this code in his reply
-    ties the approval to the exact content, not just to timing (same fix send_gate_hook.py already has)."""
+    ties the approval to the exact content, not just to timing (same fix send_gate_hook.py already has).
+
+    Honest limit (security review round 2): this code is computed from content the agent itself already has,
+    not a secret only the owner knows -- its job is telling an UNRELATED yes apart from a real one, not stopping
+    a compromised agent from computing its own code and self-approving. Closing that needs the same structural
+    fix _is_tamper() already flags (a signed or out-of-band challenge the agent cannot forge), not a longer code.
+    The length is kept short deliberately to match send_gate_hook.py's own code; _cli_approve() separately
+    refuses when two different held commands would collide on the same code within one approval window."""
     return (content_hash_hex or "")[:SHORT_CODE_LEN]
 
 
@@ -592,8 +611,18 @@ def _cli_approve(argv, logs=None, now=None):
         head = None
         the_hash = held[-1]["hash"]
     code = short_code(the_hash)
+    # security review 2026-11-18 (round 2): the code is short enough that two DIFFERENT held commands could
+    # collide on it. A reply meant for one must never get spent approving the other -- refuse outright rather
+    # than guess which one he meant.
+    window_end = since + APPROVAL_CODE_WINDOW
+    colliding = {r["hash"] for r in _read(LOG, logs) if r.get("decision") in ("block", "would_block") and r.get("hash") != the_hash
+                 and short_code(r.get("hash", "")) == code
+                 and since - APPROVAL_CODE_WINDOW < time.mktime(time.strptime(r["ts"], "%Y-%m-%dT%H:%M:%S")) < window_end}
+    if colliding:
+        print("refusing: code %s also matches another held command in this window; ask him to approve by exact --text instead" % code)
+        return 5
     ev = approval_evidence(_read(INCOMING, logs), since, now, used={r.get("by_msg") for r in _read(APPROVALS, logs) if r.get("by_msg")},
-                            code=code, deadline=since + APPROVAL_CODE_WINDOW)
+                            code=code, deadline=window_end)
     if ev is None:
         print("no go-ahead from the owner found with the code %s within %d minutes of the hold; nothing recorded" % (code, APPROVAL_CODE_WINDOW // 60))
         return 3

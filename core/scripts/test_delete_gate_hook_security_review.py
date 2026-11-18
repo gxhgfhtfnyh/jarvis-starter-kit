@@ -28,6 +28,18 @@ def test_powershell_short_aliases_are_recognized_as_writers():
     assert dg._is_tamper(r"ac logs/discord_incoming.jsonl -value x") is True
 
 
+def test_a_command_word_no_allowlist_has_ever_named_is_tamper_too():
+    """Round 2 (2026-11-18): the fix must not be another allowlist a reviewer can keep finding gaps in --
+    a command word WRITER_CMDS has never heard of must still be refused, since the check now denies by
+    default rather than only recognizing known writers."""
+    assert dg._is_tamper(r"some-brand-new-tool-nobody-listed logs/delete_gate_off.txt") is True
+
+
+def test_a_genuinely_read_only_command_on_a_protected_file_is_not_tamper():
+    assert dg._is_tamper(r"cat logs/delete_gate_off.txt") is False
+    assert dg._is_tamper(r"grep enforce logs/delete_gate_mode.txt") is False
+
+
 def test_registration_docstring_now_covers_write_edit_notebookedit():
     assert "Write|Edit|NotebookEdit" in dg.__doc__
 
@@ -64,3 +76,20 @@ def test_approval_evidence_never_approves_when_owner_not_configured(monkeypatch)
 def test_short_code_matches_send_gate_hooks_own_scheme():
     assert dg.short_code("abcdef1234567890") == "abcdef"
     assert len(dg.short_code("abcdef1234567890")) == dg.SHORT_CODE_LEN
+
+
+def test_cli_approve_refuses_when_two_held_commands_collide_on_the_same_code(tmp_path, monkeypatch):
+    """Security review round 2 (2026-11-18): a reply meant to approve one held command must never get spent
+    on a different held command that happens to share the same short code."""
+    monkeypatch.setattr(dg, "LOGS", str(tmp_path))
+    monkeypatch.setattr(dg, "short_code", lambda h: "samecod")  # force a deliberate collision
+    ts = "2026-11-18T10:00:00"
+    rows = [
+        {"ts": ts, "decision": "would_block", "hash": "aaa111", "kind": "rm_rf", "target": "x"},
+        {"ts": ts, "decision": "would_block", "hash": "bbb222", "kind": "rm_rf", "target": "y"},
+    ]
+    with open(os.path.join(str(tmp_path), dg.LOG), "w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(__import__("json").dumps(r) + "\n")
+    rc = dg._cli_approve(["approve-last"], logs=str(tmp_path), now=dg.dt.datetime(2026, 11, 18, 10, 5, 0).timestamp())
+    assert rc == 5
