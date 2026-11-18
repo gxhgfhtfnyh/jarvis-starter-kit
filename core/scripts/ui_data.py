@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Read and write the Archive Terminal's kv data (habits, commitments, quests...) without hand-editing JSON.
 Same rules as features_py/kv_store.py: name = a-z 0-9 _ - (1-40 chars, starts with a letter, no Windows device
-names), value under 200 KB, atomic write, files live in $ARCHIVE_DATA_DIR (default C:\\Users\\kumar\\jarvis-ui\\.data).
+names), value under 200 KB, atomic write, files live in $ARCHIVE_DATA_DIR (default ~/jarvis-ui/.data).
 
 Usage:
     python ui_data.py get <kvname>                 # prints the JSON value (null if absent)
@@ -31,7 +31,7 @@ def valid_name(name):
 
 
 def data_dir():
-    return Path(os.environ.get("ARCHIVE_DATA_DIR") or r"C:\Users\kumar\jarvis-ui\.data")
+    return Path(os.environ.get("ARCHIVE_DATA_DIR") or (Path.home() / "jarvis-ui" / ".data"))
 
 
 def _path(name):

@@ -1,0 +1,170 @@
+# -*- coding: utf-8 -*-
+"""Correction ledger gate (2026-11-12, built after the owner named the abandoned Correction Ledger as a real, live example
+of "a real mechanism exists but nothing enforces it" -- the ledger's manual `ledger.py add` path depends on me remembering
+to run it per correction, and the automatic path in learn_outcomes.py only fires for intent-KIND-level demotions (5+ closed,
+under 50% acceptance), never for an individual one-off correction like most of tonight's. Same shape as claim_gate.py's
+existing refusal-to-intent flow (_raise_gaps): detect the signal, raise a tier-1 intent, let keep_going.py hold the stop
+open until it's actually closed with real evidence (a ledger.py add call, or --result skipped with a stated reason).
+
+Stop hook: reads the hook JSON from stdin, finds the last user message in the turn, checks it for the existing
+correction regex (shared with learn_outcomes.py/scoreboard.py so detection logic stays in one place), and -- if it
+looks like a correction and this turn has no evidence a ledger.py add call already happened -- raises one capability_gap-
+style intent per message id (deduped so the same message never raises twice). Never blocks by itself; keep_going.py's
+existing stop gate is what actually holds the turn open on an unclosed intent.
+
+Testable core: looks_like_correction(text), ledger_call_in_turn(calls), find_correction(rows) -> (msg_id, text) or None."""
+import json
+import os
+import re
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+
+try:
+    from scoreboard import CORRECTION_RX
+except Exception:  # noqa: BLE001 -- keep working if scoreboard is unavailable, same fallback learn_outcomes.py uses
+    CORRECTION_RX = r"mistake|wrong|forgot|assum|didnt implement|dropped|losing? focus|even after"
+
+CORRECT = re.compile(
+    CORRECTION_RX.replace(r"|\bagain\b", "")
+    + r"|\bnot what i (asked|meant|wanted)|\bi (didn.?t|did not) (ask|want)|\bstop (doing|sending)\b|\bwhy (did|are) (u|you)\b",
+    re.I,
+)
+
+LEDGER_CALL = re.compile(r"\bledger\.py\b.{0,10}\badd\b", re.I)
+
+# 2026-11-12, found live: a tool/monitor notification (<task-notification>, <system-reminder>) or a post-compaction
+# summary (<artifact-content-authored-by-others/>) can each arrive as their own synthetic "user" transcript row,
+# ranking as the "last user message" even though the owner never typed any of it -- a compaction summary's huge recap
+# text matched CORRECT on a stray word ("wrong"/"assum"/etc.) the second time this fired. Fixing the second instance
+# by naming that one tag too would just leave a third sibling tag as the next live false-positive (named in
+# feedback_patch_not_root_cause_2026_11_12.md). Root cause instead: his real messages never open with an
+# angle-bracket tag at all, synthetic or not, so match the general shape (an opening/self-closing tag as the very
+# first thing in the row) rather than an enumerated tag-name whitelist.
+SYNTHETIC_WRAPPER = re.compile(r"^\s*<[A-Za-z][\w:-]*(?:\s[^<>]*)?/?>")
+
+# 2026-11-14, found live: a Skill-tool re-invocation injects the skill's own body text (e.g. the
+# research skill's SKILL.md plus whatever ARGUMENTS were passed) as a plain "user" row -- no
+# angle-bracket tag at all, so SYNTHETIC_WRAPPER above missed it, and a stray trigger word
+# somewhere inside the skill's own markdown got read as a live correction from him. The one
+# structural fingerprint common to every Skill re-invocation, regardless of which skill, is the
+# harness's own "Base directory for this skill:" preamble line -- matching THAT shape (not
+# "research" or any other skill name) keeps this a general fix, not a third enumerated instance
+# of the same patch-not-root-cause trap named in feedback_patch_not_root_cause_2026_11_12.md.
+#
+# 2026-11-15, THIRD instance, same trap: invoking update-config injected its SKILL.md starting
+# directly with "# Update Config Skill" (a markdown H1, no "Base directory" preamble line at all)
+# -- still missed. Enumerating yet another specific preamble phrase would just leave a fourth
+# skill with a different opening line as the next false positive. Real structural fingerprint
+# this time: his actual texted messages (see the VOICE hook: short, lowercase, no lists) NEVER
+# open with a markdown ATX header, while every skill body does (its own "# <Skill Name>" title or
+# YAML frontmatter). Match that shape generally instead of any skill-specific preamble text.
+SYNTHETIC_SKILL_BODY = re.compile(
+    r"^\s*\(Re-invocation of /|^\s*Base directory for this skill:|^\s*#{1,6}\s|^\s*---\s*$", re.I
+)
+
+
+def looks_like_correction(text):
+    """Pure. True when `text` matches the shared correction regex."""
+    return bool(CORRECT.search(text or ""))
+
+
+def ledger_call_in_turn(calls):
+    """Pure. True when any Bash/PowerShell command in `calls` ([(name, input), ...]) already ran `ledger.py add`."""
+    for name, inp in calls or []:
+        if name in ("Bash", "bash", "PowerShell"):
+            cmd = (inp or {}).get("command", "")
+            if LEDGER_CALL.search(cmd):
+                return True
+    return False
+
+
+def _blocks(row):
+    c = (row.get("message") or {}).get("content")
+    return c if isinstance(c, list) else []
+
+
+def find_correction(rows):
+    """Pure. Scan transcript rows (dicts) for the last turn's user message and this turn's tool calls.
+    -> (msg_id, text, had_ledger_call) or None if the last user message doesn't look like a correction.
+    msg_id is the user row's own id when present, else a hash of its text+timestamp (stable across re-reads of the same line)."""
+    rows = [r for r in rows if isinstance(r, dict) and r.get("type") in ("user", "assistant")]
+    last_user_idx = None
+    for i, r in enumerate(rows):
+        if r["type"] != "user":
+            continue
+        content = (r.get("message") or {}).get("content")
+        text = content if isinstance(content, str) else " ".join(b.get("text", "") for b in _blocks(r) if b.get("type") == "text")
+        if text.strip() and not SYNTHETIC_WRAPPER.match(text) and not SYNTHETIC_SKILL_BODY.match(text):
+            last_user_idx = i
+    if last_user_idx is None:
+        return None
+    row = rows[last_user_idx]
+    content = (row.get("message") or {}).get("content")
+    if isinstance(content, str):
+        text = content
+    else:
+        text = " ".join(b.get("text", "") for b in _blocks(row) if b.get("type") == "text")
+    if not looks_like_correction(text):
+        return None
+    calls = []
+    for r in rows[last_user_idx:]:
+        for b in _blocks(r):
+            if r["type"] == "assistant" and b.get("type") == "tool_use" and b.get("name") in ("Bash", "bash", "PowerShell"):
+                calls.append((b.get("name"), b.get("input") or {}))
+    had_ledger_call = ledger_call_in_turn(calls)
+    msg_id = row.get("uuid") or row.get("id")
+    if not msg_id:
+        import hashlib
+
+        msg_id = hashlib.sha1((text + str(row.get("timestamp", ""))).encode("utf-8", "replace")).hexdigest()[:10]
+    return (str(msg_id), text.strip()[:200], had_ledger_call)
+
+
+def _raise_correction_intent(msg_id, text):
+    import intent_store
+
+    what = (
+        'CORRECTION not yet in the ledger: "%s". Log it now: python ledger.py add <this msg id or a short tag> '
+        '"<what I got wrong>" "<the truth>" "<real cause, file or habit>" "<the fix>". Close this intent once the row exists, '
+        "or --result skipped with why if it genuinely isn't a correction worth a row." % text
+    )
+    dedupe = "correction-%s" % msg_id
+    cand = intent_store.new_intent("correction_unlogged", what, tier=1, value=3, dedupe=dedupe, from_event="correction")
+    intents = intent_store.read_jsonl(intent_store.INTENTS)
+    if not intent_store.is_duplicate(intents, cand):
+        intents.append(cand)
+        intent_store.write_intents(intents)
+
+
+def main():
+    try:
+        if os.environ.get("JARVIS_FALLBACK") or os.path.exists(r"J:\Jarvis2\logs\correction_ledger_gate_off.txt"):
+            return
+        raw = sys.stdin.buffer.read().decode("utf-8", errors="replace") if hasattr(sys.stdin, "buffer") else sys.stdin.read()
+        data = json.loads(raw or "{}")
+        path = data.get("transcript_path")
+        if not path:
+            return
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()[-600:]
+        rows = []
+        for line in lines:
+            try:
+                rows.append(json.loads(line))
+            except Exception:  # noqa: BLE001
+                pass
+        found = find_correction(rows)
+        if found is None:
+            return
+        msg_id, text, had_ledger_call = found
+        if had_ledger_call:
+            return
+        _raise_correction_intent(msg_id, text)
+    except Exception:  # noqa: BLE001 -- never blocks the real turn on a gate bug
+        return
+
+
+if __name__ == "__main__":
+    main()
