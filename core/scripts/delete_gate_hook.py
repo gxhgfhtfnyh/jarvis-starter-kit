@@ -74,6 +74,11 @@ MAX_COMMAND = 40000
 # 2026-11-06), and the kill switch/log/approvals files need the same protection send_gate_hook.py gives
 # its own evidence trail.
 RX_TAMPER = re.compile(r"delete_approvals(?:_used)?\.jsonl|delete_gate_off\.txt|delete_gate_mode\.txt|delete_gate\.jsonl|discord_incoming\.jsonl", re.I)
+# security review 2026-11-18 (round 4): a quote the simple scanner never saw closed, or a backslash
+# immediately before one, means _split_unquoted()/_tokens() cannot be trusted to have modeled this
+# text the way the real shell will -- an odd quote count catches the first, the backslash pattern
+# the second (both target vs on-disk/PowerShell-vs-POSIX escaping differences this file does not parse)
+RX_UNBALANCED_QUOTE = re.compile(r'\\["\']')
 WRITER_CMDS = frozenset(("tee", "rm", "del", "mv", "move", "cp", "copy", "truncate", "remove-item", "set-content",
                          "add-content", "out-file", "new-item", "clear-content", "ri", "erase", "rd", "rmdir", "ren", "rename",
                          # security review 2026-11-18: common short PowerShell aliases and plain creation verbs that
@@ -335,6 +340,15 @@ def _is_tamper(full):
     a WILDCARD or a VARIABLE rather than one of the literal protected names (`rm logs/delete_*`,
     `echo x >> $LOGS_DIR/discord_incoming.jsonl`) -- those would not match the exact filenames above."""
     if RX_TAMPER.search(full):
+        # round 4 (2026-11-18): the read-only pass above trusts tokens[0] to be the ONLY thing that
+        # runs, but command substitution (`$(...)`, backticks, `<(...)`) executes a second, hidden
+        # command as a side effect while `cat` just looks like the outer command -- `cat $(touch
+        # delete_gate_off.txt)` tokenizes with word="cat" and never sees the real write. Once a
+        # protected name is in play, fail closed on ANY substitution/grouping/quoting syntax the
+        # splitter cannot fully model for every shell, same philosophy as _is_provably_inert()'s own
+        # character-class denial above (round 4, 2026-11-06) rather than trying to parse it correctly.
+        if re.search(r"[(){}<>`\[\]$]", full) or RX_UNBALANCED_QUOTE.search(full) or full.count('"') % 2 or full.count("'") % 2:
+            return True
         # round 3 (2026-11-18): judge the WHOLE command, not the one segment that happens to name the
         # file -- a pipe/chain can do its real writing in a different segment than the one that names
         # the protected file (`echo discord_incoming.jsonl | xargs tee`), so a protected name ANYWHERE

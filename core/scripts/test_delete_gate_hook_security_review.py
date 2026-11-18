@@ -70,6 +70,20 @@ def test_round_3_any_bare_redirect_on_a_tampering_statement_is_caught_even_off_p
     assert dg._is_tamper(r'echo x > "some var" discord_incoming.jsonl') is True
 
 
+def test_round_4_command_substitution_hiding_a_real_write_behind_a_read_only_outer_command_is_tamper():
+    """`cat` tokenizes as the outer command and looks read-only, but $(...) executes the real write
+    as a side effect before cat ever runs -- the outer command word alone cannot be trusted once any
+    substitution syntax is present."""
+    assert dg._is_tamper(r"cat $(touch delete_gate_off.txt)") is True
+    assert dg._is_tamper(r"cat `touch delete_gate_off.txt`") is True
+    assert dg._is_tamper(r"cat <(touch delete_gate_off.txt)") is True
+
+
+def test_round_4_an_unclosed_or_escaped_quote_on_a_tampering_statement_is_tamper():
+    assert dg._is_tamper(r'cat delete_gate_off.txt"') is True
+    assert dg._is_tamper(r'cat \"delete_gate_off.txt') is True
+
+
 def test_registration_docstring_now_covers_write_edit_notebookedit():
     assert "Write|Edit|NotebookEdit" in dg.__doc__
 
