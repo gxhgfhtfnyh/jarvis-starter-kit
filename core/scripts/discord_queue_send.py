@@ -398,7 +398,10 @@ def lookup_incoming(message_id, logs=None):
 
 # ---------- the CLI ----------
 def build_parser():
-    ap = argparse.ArgumentParser(prog="discord_queue_send.py", add_help=True, description="Queue a Discord message for discord_daemon.py to send.")
+    ap = argparse.ArgumentParser(prog="discord_queue_send.py", add_help=True, description="Queue a Discord message for discord_daemon.py to send.",
+                                  allow_abbrev=False)   # security review 2026-11-18: an abbreviated flag like --u would still resolve to --user here but would not
+                                                         # match the gate's own regex-based flag reader (which looks for the literal --user), so a send could reach
+                                                         # a real recipient while the gate thought it had no target flag at all and fell through to the untargeted-default-is-safe case
     ap.add_argument("text", nargs="?", default=None)
     ap.add_argument("--stdin", action="store_true", help="read the text from stdin")
     ap.add_argument("--reply-to", dest="reply_to", default=None)

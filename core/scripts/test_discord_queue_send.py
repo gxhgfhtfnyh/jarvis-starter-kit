@@ -573,3 +573,14 @@ def test_the_script_runs_as_a_process_with_its_own_harness_environment(tmp_path)
     assert [json.loads(p.read_text(encoding="utf-8")) for p in (lg / "discord_outbox").glob("*.json")] == [{"text": "hello from a process"}]
     held = subprocess.run([sys.executable, str(HERE / "discord_queue_send.py"), "hi", "--user", str(OTHER)], capture_output=True, text=True, env=env, timeout=30)
     assert held.returncode == 6 and "approve.py" in held.stdout
+
+
+def test_abbreviated_flags_are_rejected_not_silently_resolved():
+    """Security review (2026-11-18): allow_abbrev=False must actually be set, or an abbreviated flag like --u
+    would resolve to --user here while the gate's own regex-based reader (which looks for the literal --user)
+    would see no target flag at all and fall through to the untargeted-default-is-safe case -- a real
+    authorization bypass if the two ever disagree about what a given command string means."""
+    ap = Q.build_parser()
+    import pytest as _pytest
+    with _pytest.raises(SystemExit):
+        ap.parse_args(["hello", "--u", "123"])

@@ -504,12 +504,22 @@ def _discord_one(stmt, lookup, us, ch, rt):
 
 
 def _telegram_class(stmt):
-    """A Telegram send. A send to his own owner chat_id or a reply into the one group he allowed (an approved friend's) is a standing exception like the Discord group; anything else
-    needs his approval. telegram_bot_send.py's --reply-to is always <chat_id>[:<message_id>] (the chat_id is required even for a bare DM with no message being replied to),
-    so the colon-and-message-id is optional here."""
-    m = re.search(r"--reply-to(?:\s+|=)(-?\d+)(?::\d+)?", stmt)
-    if m and int(m.group(1)) in TELEGRAM_STANDING_CHATS:
-        return dict(external=True, kind="telegram_standing", target=m.group(1), standing=True, why="telegram send to his own chat or the group he allowed")
+    """A Telegram send. A send to the owner's own chat_id or a reply into an approved group is a standing exception like the Discord group; anything else
+    needs approval. telegram_bot_send.py's --reply-to is always <chat_id>[:<message_id>] (the chat_id is required even for a bare DM with no message being
+    replied to), so the colon-and-message-id is optional here. Security review 2026-11-18 (decoy flag): a bare regex search for the first --reply-to in the
+    text could be fooled by an earlier decoy occurrence (inside a quoted message argument, say) -- use _flag_values so every occurrence is read the same way
+    classify() already reads --user/--channel/--reply-to elsewhere, and require EVERY value found to be a standing chat before calling it standing at all."""
+    values = _flag_values(stmt, "reply-to")
+    if not values:
+        return dict(external=True, kind="telegram", target="telegram", standing=False, why="a Telegram send script")
+    chat_ids = []
+    for v in values:
+        m = re.match(r"^(-?\d+)(?::\d+)?$", v)
+        if not m:
+            return dict(external=True, kind="telegram", target="telegram", standing=False, why="a Telegram send script")
+        chat_ids.append(int(m.group(1)))
+    if all(c in TELEGRAM_STANDING_CHATS for c in chat_ids):
+        return dict(external=True, kind="telegram_standing", target=str(chat_ids[0]), standing=True, why="telegram send to the owner's own chat or an approved group")
     return dict(external=True, kind="telegram", target="telegram", standing=False, why="a Telegram send script")
 
 
