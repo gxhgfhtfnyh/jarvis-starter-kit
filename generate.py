@@ -105,6 +105,12 @@ def resolve_answers(questions: dict, answers: dict, today: date | None = None) -
 # a stranger may not have (canva@claude-plugins-official) or a narrow language-specific fit (typesafe@typesafe-ai).
 # dream-review is left out too, on purpose: the kit's own CLAUDE.md already tells a new owner it's "available to
 # anyone separately" rather than something baked in, since it needs its own one-time per-vault setup conversation.
+# 2026-11-19, security review (MEDIUM): watch@claude-video was dropped from this list too, for the same reason as
+# the others above but a sharper one -- its marketplace (bradautomates/claude-video) is an individual third-party
+# GitHub repo, not a first-party one (anthropics/* or claude-plugins-official), and this list auto-enables on
+# every fresh install with no review step. Auto-enabling unpinned third-party code for a stranger is a real
+# supply-chain exposure, not a style preference: keep the auto-enabled set to first-party marketplaces only, and
+# let an owner who wants watch@claude-video add it themselves once they've looked at it.
 RECOMMENDED_PLUGINS = {
     "example-skills@anthropic-agent-skills": True,
     "document-skills@anthropic-agent-skills": True,
@@ -120,11 +126,9 @@ RECOMMENDED_PLUGINS = {
     "feature-dev@claude-plugins-official": True,
     "claude-security@claude-plugins-official": True,
     "skill-creator@claude-plugins-official": True,
-    "watch@claude-video": True,
 }
 RECOMMENDED_MARKETPLACES = {
     "anthropic-agent-skills": {"source": {"source": "github", "repo": "anthropics/skills"}},
-    "claude-video": {"source": {"source": "github", "repo": "bradautomates/claude-video"}},
 }
 
 
@@ -219,8 +223,10 @@ def _with_recommended_plugins(data: bytes) -> bytes:
     same bytes each time and settings.json stays correctly "skipped" on an unchanged folder -- a separate
     post-step broke that idempotency, found live in the same pass (test_a_second_run_... regressed)."""
     parsed = json.loads(data.decode("utf-8"))
-    parsed.setdefault("enabledPlugins", {}).update(RECOMMENDED_PLUGINS)
-    parsed.setdefault("extraKnownMarketplaces", {}).update(RECOMMENDED_MARKETPLACES)
+    # existing keys win (security review, 2026-11-19): a key the template already defines -- including an
+    # explicit False someone set on purpose -- must never be silently overwritten by this default list.
+    parsed["enabledPlugins"] = {**RECOMMENDED_PLUGINS, **parsed.get("enabledPlugins", {})}
+    parsed["extraKnownMarketplaces"] = {**RECOMMENDED_MARKETPLACES, **parsed.get("extraKnownMarketplaces", {})}
     return (json.dumps(parsed, indent=2) + "\n").encode("utf-8")
 
 

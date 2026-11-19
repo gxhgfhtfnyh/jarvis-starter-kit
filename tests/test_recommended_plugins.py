@@ -56,3 +56,25 @@ def test_with_recommended_plugins_merges_without_clobbering_existing_keys():
 def test_with_recommended_plugins_is_deterministic():
     base = json.dumps({"hooks": {}}).encode("utf-8")
     assert G._with_recommended_plugins(base) == G._with_recommended_plugins(base)
+
+
+def test_with_recommended_plugins_never_clobbers_an_explicit_existing_value():
+    """Security review (2026-11-19): a key the template already defines on purpose -- including an explicit
+    False -- must win over this default list, never be silently overwritten by it."""
+    key = next(iter(G.RECOMMENDED_PLUGINS))
+    base = json.dumps({"hooks": {}, "enabledPlugins": {key: False}}).encode("utf-8")
+    merged = json.loads(G._with_recommended_plugins(base).decode("utf-8"))
+    assert merged["enabledPlugins"][key] is False
+
+
+def test_no_third_party_marketplace_is_auto_enabled():
+    """Security review (2026-11-19, MEDIUM): auto-enabling an individual third-party GitHub repo's plugin on
+    every fresh install, with no review step, is a real supply-chain exposure -- the default set must only come
+    from first-party marketplaces (anthropics/* or claude-plugins-official)."""
+    for key in G.RECOMMENDED_PLUGINS:
+        marketplace = key.split("@", 1)[1]
+        if marketplace in G.RECOMMENDED_MARKETPLACES:
+            repo = G.RECOMMENDED_MARKETPLACES[marketplace]["source"]["repo"]
+            assert repo.startswith("anthropics/"), "non-first-party repo auto-enabled: %s (%s)" % (key, repo)
+        else:
+            assert marketplace == "claude-plugins-official"
