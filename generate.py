@@ -95,6 +95,39 @@ def resolve_answers(questions: dict, answers: dict, today: date | None = None) -
     return values, sources
 
 
+# Marketplace plugins a fresh assistant starts with switched on, so it works as capably as possible straight out
+# of the interview -- his own direct ask ("might wanna make his AI automatically install the skills and plugins
+# that we have"). Judged 2026-11-19 against the real list in ~/.claude/settings.json's own enabledPlugins (not
+# the much larger ~90-skill listing that conflates MCP tools and this operator's own project-local skills with
+# actual installable marketplace plugins): kept only the broadly-useful, no-external-account, official ones.
+# Deliberately left out: anything personal-infrastructure (jarvis-monitors@jarvis-local -- built for this
+# operator's own watcher architecture, meaningless on a fresh install) and anything needing an external account
+# a stranger may not have (canva@claude-plugins-official) or a narrow language-specific fit (typesafe@typesafe-ai).
+# dream-review is left out too, on purpose: the kit's own CLAUDE.md already tells a new owner it's "available to
+# anyone separately" rather than something baked in, since it needs its own one-time per-vault setup conversation.
+RECOMMENDED_PLUGINS = {
+    "example-skills@anthropic-agent-skills": True,
+    "document-skills@anthropic-agent-skills": True,
+    "claude-api@anthropic-agent-skills": True,
+    "academy-guide@anthropic-agent-skills": True,
+    "discernment-nudge@anthropic-agent-skills": True,
+    "security-guidance@claude-plugins-official": True,
+    "superpowers@claude-plugins-official": True,
+    "frontend-design@claude-plugins-official": True,
+    "code-review@claude-plugins-official": True,
+    "code-simplifier@claude-plugins-official": True,
+    "context7@claude-plugins-official": True,
+    "feature-dev@claude-plugins-official": True,
+    "claude-security@claude-plugins-official": True,
+    "skill-creator@claude-plugins-official": True,
+    "watch@claude-video": True,
+}
+RECOMMENDED_MARKETPLACES = {
+    "anthropic-agent-skills": {"source": {"source": "github", "repo": "anthropics/skills"}},
+    "claude-video": {"source": {"source": "github", "repo": "bradautomates/claude-video"}},
+}
+
+
 def python_values() -> dict:
     """The interpreter this folder will use. python_exe goes into the hook wiring (an absolute path, so the hooks start on a computer that has only `python3` or only `py`);
     python_plain is the command the notes tell the assistant to type."""
@@ -177,6 +210,20 @@ def generate(kit_dir: str | Path, answers: dict, out_dir: str | Path, force: boo
     return report
 
 
+def _with_recommended_plugins(data: bytes) -> bytes:
+    """Merges RECOMMENDED_PLUGINS/RECOMMENDED_MARKETPLACES into rendered settings.json bytes, as real JSON (not
+    text substitution: settings.json.tpl's raw, unrendered form must stay valid JSON on its own, since
+    update_assistant.py parses the .tpl directly to compare hook structures -- a bare {{placeholder}} as a JSON
+    value, found live 2026-11-19, broke that). Called on every render of this one file, before the skip/overwrite
+    compare in _copy_core (not as a separate post-step after it), so a repeat generate() call renders the exact
+    same bytes each time and settings.json stays correctly "skipped" on an unchanged folder -- a separate
+    post-step broke that idempotency, found live in the same pass (test_a_second_run_... regressed)."""
+    parsed = json.loads(data.decode("utf-8"))
+    parsed.setdefault("enabledPlugins", {}).update(RECOMMENDED_PLUGINS)
+    parsed.setdefault("extraKnownMarketplaces", {}).update(RECOMMENDED_MARKETPLACES)
+    return (json.dumps(parsed, indent=2) + "\n").encode("utf-8")
+
+
 def _write_manifest(core: Path, out: Path) -> None:
     """logs/kit_manifest.json: the sha256 of each core file exactly as the kit wrote it, so update_assistant.py can tell a file the owner never edited (safe to update)
     from one they changed. A file that was already there and differs from the kit's is not recorded: it counts as edited."""
@@ -216,6 +263,8 @@ def _copy_core(core: Path, out: Path, values: dict, force: bool, report: dict) -
         if not is_safe_path(rel):
             raise UnsafePath(rel)
         data = render(src.read_text(encoding="utf-8"), extra).encode("utf-8") if is_tpl else src.read_bytes()
+        if rel == ".claude/settings.json":            # merged here, before the skip/overwrite compare, so a repeat run's render is byte-identical and genuinely idempotent
+            data = _with_recommended_plugins(data)
         target = out / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists():
