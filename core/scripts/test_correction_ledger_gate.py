@@ -245,6 +245,32 @@ def test_find_correction_discord_path_none_on_plain_chat():
     assert clg.find_correction(rows) is None
 
 
+def test_find_correction_prefers_a_later_typed_correction_over_an_earlier_discord_echo():
+    """2026-11-19, caught by security review: the first version of the Discord-path fix always preferred
+    it over the direct-typed path regardless of order, so a real terminal-typed correction followed by an
+    unrelated, later Discord echo of an OLDER message would be missed. The Discord row here (index 0) is
+    chronologically earlier than the real typed correction (index 1), so the typed one must win."""
+    rows = [
+        _inbox_hook_row(1, "sounds good"),  # an earlier Discord message, now stale
+        _user_row("no that's wrong, not what i asked for", uuid="typed1"),  # a later real correction
+    ]
+    found = clg.find_correction(rows)
+    assert found is not None
+    msg_id, text, _had_call = found
+    assert msg_id == "typed1"
+    assert "wrong" in text
+
+
+def test_find_correction_prefers_a_later_discord_message_over_an_earlier_typed_correction():
+    """The mirror case: a real typed correction followed by a later, unrelated Discord message must not
+    fire -- the Discord message is genuinely the most recent real thing he said, so it governs."""
+    rows = [
+        _user_row("no that's wrong, not what i asked for", uuid="typed1"),
+        _inbox_hook_row(2, "sounds good"),  # a later Discord message, supersedes the earlier correction
+    ]
+    assert clg.find_correction(rows) is None
+
+
 def test_find_last_discord_message_ignores_unrelated_id_colon_text_shapes():
     """An "id N: text" shape that appears outside the real inbox_hook header must not be mistaken for one."""
     rows = [{"type": "assistant", "message": {"content": [{"type": "text", "text": "id 5: not a discord dm, just text"}]}}]

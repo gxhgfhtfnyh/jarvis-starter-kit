@@ -152,54 +152,52 @@ def _ledger_call_from(all_rows, start_idx):
     return ledger_call_in_turn(calls)
 
 
-def find_correction(rows):
-    """Pure. Scan transcript rows (dicts) for the owner's last real message and this turn's tool calls.
-    -> (msg_id, text, had_ledger_call) or None if it doesn't look like a correction.
-
-    Tries the Discord path first (find_last_discord_message, over every row regardless of type -- see the
-    2026-11-19 note above find_last_discord_message for why the old type-filtered path alone misses every
-    Discord-relayed message). Falls back to the original direct-typed "type": "user" row scan for a
-    terminal-typed session with no Discord traffic in this window. msg_id is the Discord message's own id
-    when that path matched, else the user row's own id, else a hash of its text+timestamp."""
-    discord_hit = find_last_discord_message(rows)
-    if discord_hit is not None:
-        idx, msg_id, text = discord_hit
-        if not looks_like_correction(text):
-            return None
-        had_ledger_call = _ledger_call_from(rows, idx)
-        return (str(msg_id), text[:200], had_ledger_call)
-
-    rows = [r for r in rows if isinstance(r, dict) and r.get("type") in ("user", "assistant")]
-    last_user_idx = None
+def _find_last_typed_user_row(rows):
+    """Pure. Scan the FULL, unfiltered row list (original indices, so they stay comparable against
+    find_last_discord_message's indices) for the last non-synthetic "type": "user" row.
+    -> (index, msg_id, text) or None."""
+    last = None
     for i, r in enumerate(rows):
-        if r["type"] != "user":
+        if not isinstance(r, dict) or r.get("type") != "user":
             continue
         content = (r.get("message") or {}).get("content")
         text = content if isinstance(content, str) else " ".join(b.get("text", "") for b in _blocks(r) if b.get("type") == "text")
         if text.strip() and not SYNTHETIC_WRAPPER.match(text) and not SYNTHETIC_SKILL_BODY.match(text):
-            last_user_idx = i
-    if last_user_idx is None:
+            msg_id = r.get("uuid") or r.get("id")
+            if not msg_id:
+                import hashlib
+
+                msg_id = hashlib.sha1((text + str(r.get("timestamp", ""))).encode("utf-8", "replace")).hexdigest()[:10]
+            last = (i, str(msg_id), text.strip())
+    return last
+
+
+def find_correction(rows):
+    """Pure. Scan transcript rows (dicts) for the owner's last real message (whichever channel it actually
+    came in on) and this turn's tool calls. -> (msg_id, text, had_ledger_call) or None if it doesn't look
+    like a correction.
+
+    2026-11-19, security review caught a real gap in the first version of this fix: it always preferred the
+    Discord path over the direct-typed "type: user" path, so a real terminal-typed correction immediately
+    followed by an unrelated, later Discord message (e.g. "ok") would be silently missed -- the Discord
+    path's benign text would win regardless of which one actually happened last. Fixed by finding both
+    candidates (over the same full, unfiltered row list so their indices are comparable) and keeping
+    whichever is later in file order; only that one is checked for looks_like_correction. A non-correction
+    beats a correction only when it is genuinely the more recent real message, not just because it came
+    over a particular channel."""
+    discord_hit = find_last_discord_message(rows)
+    typed_hit = _find_last_typed_user_row(rows)
+    if discord_hit is None and typed_hit is None:
         return None
-    row = rows[last_user_idx]
-    content = (row.get("message") or {}).get("content")
-    if isinstance(content, str):
-        text = content
+    if typed_hit is None or (discord_hit is not None and discord_hit[0] >= typed_hit[0]):
+        winner = discord_hit
     else:
-        text = " ".join(b.get("text", "") for b in _blocks(row) if b.get("type") == "text")
+        winner = typed_hit
+    idx, msg_id, text = winner
     if not looks_like_correction(text):
         return None
-    calls = []
-    for r in rows[last_user_idx:]:
-        for b in _blocks(r):
-            if r["type"] == "assistant" and b.get("type") == "tool_use" and b.get("name") in ("Bash", "bash", "PowerShell"):
-                calls.append((b.get("name"), b.get("input") or {}))
-    had_ledger_call = ledger_call_in_turn(calls)
-    msg_id = row.get("uuid") or row.get("id")
-    if not msg_id:
-        import hashlib
-
-        msg_id = hashlib.sha1((text + str(row.get("timestamp", ""))).encode("utf-8", "replace")).hexdigest()[:10]
-    return (str(msg_id), text.strip()[:200], had_ledger_call)
+    had_ledger_call = _ledger_call_from(rows, idx)
+    return (str(msg_id), text[:200], had_ledger_call)
 
 
 def _raise_correction_intent(msg_id, text):
