@@ -64,6 +64,60 @@ SYNTHETIC_SKILL_BODY = re.compile(
     r"^\s*\(Re-invocation of /|^\s*Base directory for this skill:|^\s*#{1,6}\s|^\s*---\s*$", re.I
 )
 
+# 2026-11-19, FOURTH instance of the same patch-not-root-cause trap, and the biggest one yet: every correction
+# the owner sent tonight came in over Discord (the whole session is Discord-relay driven), and NOT ONE of them ever
+# raised a correction_unlogged intent -- he had to call it out live ("why are u putting it in backlog... thats a
+# bad habit") before a fix happened at all. Root cause, confirmed by reading the raw transcript lines directly:
+# a Discord-relayed message never lands as a plain {"type": "user", "message": {"content": "<his words>"}} row in
+# this harness's JSONL at all. inbox_hook.py's PostToolUse context (the one authoritative, structurally-guaranteed
+# carrier of his real words -- built only from `author_id == OWNER and source == "dm"`) lands on rows typed
+# "attachment" / "api-request-blob" / "queue-operation", none of which `find_correction`'s own type filter
+# (`r.get("type") in ("user", "assistant")`) ever kept. So the whole SYNTHETIC_WRAPPER/SYNTHETIC_SKILL_BODY
+# filtering chain above never even got a chance to see his real text -- the rows carrying it were discarded one
+# step earlier. Fix: don't try to guess which row "type" is real this time (that's the same enumerate-and-miss
+# shape as the first three instances); instead key off inbox_hook's own unambiguous "id <N>: <text>" line, which
+# only ever gets written from a confirmed real DM, and scan it out of EVERY row regardless of type.
+DISCORD_DM_HEADER = "NEW DISCORD DM from the owner"
+DISCORD_DM_LINE = re.compile(r"^id (\d+): (.+)$", re.M)
+
+
+def _iter_strings(obj):
+    """Pure. Yield every string leaf anywhere inside a nested dict/list structure. A hook's
+    stdout is itself a JSON blob captured as a plain string (double-encoded: its own newlines
+    are literal backslash-n, not real newline characters, until this re-parses it) -- recurse
+    into any string that looks like JSON so DISCORD_DM_LINE's real-newline anchors still match."""
+    if isinstance(obj, str):
+        yield obj
+        stripped = obj.strip()
+        if stripped[:1] in ("{", "["):
+            try:
+                yield from _iter_strings(json.loads(stripped))
+            except Exception:  # noqa: BLE001 -- not actually JSON, just a string that starts with { or [
+                pass
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            yield from _iter_strings(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _iter_strings(v)
+
+
+def find_last_discord_message(rows):
+    """Pure. Scan every row (any type -- the bug above was trusting a type filter that misses them) for
+    inbox_hook's own '[NEW DISCORD DM from the owner ...]' block and return (index, msg_id, text) for the LAST
+    such line in file order, or None. `index` is the row's position in `rows`, needed to scan forward from it
+    for a ledger.py call same as the old user/assistant path did."""
+    last = None
+    for i, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        for s in _iter_strings(row):
+            if DISCORD_DM_HEADER not in s:
+                continue
+            for m in DISCORD_DM_LINE.finditer(s):
+                last = (i, m.group(1), m.group(2).strip())
+    return last
+
 
 def looks_like_correction(text):
     """Pure. True when `text` matches the shared correction regex."""
@@ -85,10 +139,36 @@ def _blocks(row):
     return c if isinstance(c, list) else []
 
 
+def _ledger_call_from(all_rows, start_idx):
+    """Pure. True when any assistant Bash/PowerShell tool_use at or after `start_idx` in `all_rows`
+    (the full, unfiltered row list) already ran `ledger.py add`."""
+    calls = []
+    for r in all_rows[start_idx:]:
+        if not isinstance(r, dict) or r.get("type") != "assistant":
+            continue
+        for b in _blocks(r):
+            if b.get("type") == "tool_use" and b.get("name") in ("Bash", "bash", "PowerShell"):
+                calls.append((b.get("name"), b.get("input") or {}))
+    return ledger_call_in_turn(calls)
+
+
 def find_correction(rows):
-    """Pure. Scan transcript rows (dicts) for the last turn's user message and this turn's tool calls.
-    -> (msg_id, text, had_ledger_call) or None if the last user message doesn't look like a correction.
-    msg_id is the user row's own id when present, else a hash of its text+timestamp (stable across re-reads of the same line)."""
+    """Pure. Scan transcript rows (dicts) for the owner's last real message and this turn's tool calls.
+    -> (msg_id, text, had_ledger_call) or None if it doesn't look like a correction.
+
+    Tries the Discord path first (find_last_discord_message, over every row regardless of type -- see the
+    2026-11-19 note above find_last_discord_message for why the old type-filtered path alone misses every
+    Discord-relayed message). Falls back to the original direct-typed "type": "user" row scan for a
+    terminal-typed session with no Discord traffic in this window. msg_id is the Discord message's own id
+    when that path matched, else the user row's own id, else a hash of its text+timestamp."""
+    discord_hit = find_last_discord_message(rows)
+    if discord_hit is not None:
+        idx, msg_id, text = discord_hit
+        if not looks_like_correction(text):
+            return None
+        had_ledger_call = _ledger_call_from(rows, idx)
+        return (str(msg_id), text[:200], had_ledger_call)
+
     rows = [r for r in rows if isinstance(r, dict) and r.get("type") in ("user", "assistant")]
     last_user_idx = None
     for i, r in enumerate(rows):
