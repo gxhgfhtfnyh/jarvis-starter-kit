@@ -23,7 +23,10 @@ MAX_TURNS = 10
 # the owner's real Kyogen DM channel id -- the one actual ongoing conversation. The terminal has
 # no channel concept of its own, so it reads/writes under this exact same key rather than
 # inventing a separate one that would just be a THIRD disconnected history.
-SHARED_KEY = 1570870402769485844
+# Fill in your own DM channel id here (not a placeholder you can skip -- a stranger's channel id
+# left in this constant would silently make every fresh kit install share history with the
+# original owner's conversation instead of starting its own).
+SHARED_KEY = None
 
 
 def load_history(path=HISTORY_FILE):

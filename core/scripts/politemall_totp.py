@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """TOTP (authenticator-app) codes for the POLITEmall / RP Microsoft sign-in, using only the standard library.
 
-The base32 secret key lives in Windows Credential Manager (service `politemall-totp`, user 25024390@myrp.edu.sg), never in a file or a chat.
+The base32 secret key lives in Windows Credential Manager (service `politemall-totp`, user yourname@example.edu), never in a file or a chat.
 
     python politemall_totp.py setup    # the owner runs this himself: paste the secret key at the hidden prompt, it is stored and the current code is shown
     python politemall_totp.py code     # print the current 6-digit code (used by login_politemall.py)

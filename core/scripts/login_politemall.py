@@ -10,7 +10,7 @@ blocked | unknown. From `push` it clicks "I can't use my Microsoft Authenticator
 "Use a verification code", then types the TOTP from Credential Manager (politemall_totp.py). Password from Credential Manager
 item `politemall`. Credentials are never printed or logged.
 
-One-time setup (the owner runs it): pip install keyring playwright; python -m keyring set politemall 25024390@myrp.edu.sg
+One-time setup (the owner runs it): pip install keyring playwright; python -m keyring set politemall yourname@example.edu
 Usage:  python login_politemall.py [--headless]      (the callers always use --headless)
 """
 import json
