@@ -89,6 +89,29 @@ def test_a_launcher_copied_out_of_its_folder_says_what_is_wrong_instead_of_closi
     assert r.returncode == 1 and "has to stay in the kit folder" in r.stdout and "zip" in r.stdout and "Press any key" in r.stdout and "CLAUDE-ARGS" not in r.stdout
 
 
+def test_winget_install_forces_the_winget_source():
+    # Real failure seen live (2026-11-20): a computer whose msstore winget source has a broken
+    # certificate fails the WHOLE winget install with no package installed, even for a package
+    # (Python.Python.3.12) that is also on the winget source itself. --source winget avoids the
+    # broken source entirely instead of failing on an unrelated one.
+    text = open(os.path.join(KIT, "start.cmd"), encoding="utf-8").read()
+    assert "winget install -e --id Python.Python.3.12 --source winget" in text
+
+
+def test_a_failed_winget_install_says_so_instead_of_claiming_success():
+    # Same live incident: the script used to go to :restart ("Python was installed...") whenever
+    # PY was still undefined after the install attempt, even when winget had genuinely failed and
+    # nothing was installed -- a real, confusing false-success message. It must now distinguish
+    # "found at the expected path" (:restart) from "still nothing there" (:installfailed).
+    text = open(os.path.join(KIT, "start.cmd"), encoding="utf-8").read()
+    assert ":installfailed" in text
+    assert "did not actually finish" in text
+    install_start = text.index("winget install -e")
+    install_block = text[install_start:text.index("\n:havepython", install_start)]
+    assert "goto :installfailed" in install_block
+    assert install_block.index("if not defined PY goto :installfailed") < install_block.index("goto :restart")
+
+
 def test_start_cmd_has_windows_line_endings_only():
     data = open(os.path.join(KIT, "start.cmd"), "rb").read()
     assert data.count(b"\r\n") > 20 and data.replace(b"\r\n", b"").count(b"\n") == 0

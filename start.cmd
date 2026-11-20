@@ -13,10 +13,15 @@ where winget >nul 2>nul || goto :nopython
 echo Python 3.10 or newer is needed and was not found on this computer.
 choice /C YN /M "Install Python 3.12 now with winget (about 100 MB)"
 if errorlevel 2 goto :nopython
-winget install -e --id Python.Python.3.12 --accept-source-agreements --accept-package-agreements --silent
+rem --source winget: a computer whose msstore winget source has a broken/expired certificate (seen live,
+rem 2026-11-20) fails the WHOLE install with no package installed, even though Python.Python.3.12 is also
+rem on the winget source itself -- forcing that source instead avoids a working package failing only
+rem because of an unrelated broken source.
+winget install -e --id Python.Python.3.12 --source winget --accept-source-agreements --accept-package-agreements --silent
 call :findpython
 if not defined PY if exist "%LOCALAPPDATA%\Programs\Python\Python312\python.exe" set PY="%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
-if not defined PY goto :restart
+if not defined PY goto :installfailed
+goto :restart
 
 :havepython
 where claude >nul 2>nul || goto :noclaude
@@ -44,6 +49,11 @@ goto :fail
 :restart
 echo.
 echo Python was installed. Close this window and run start.cmd again so that it can be found.
+goto :fail
+
+:installfailed
+echo.
+echo The winget install did not actually finish (no python.exe found afterward). Install Python 3.10 or newer yourself from https://www.python.org/downloads/ (tick "Add python.exe to PATH"), then run start.cmd again.
 goto :fail
 
 :broken
