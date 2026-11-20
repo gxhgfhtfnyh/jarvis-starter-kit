@@ -305,7 +305,13 @@ def verify(out_dir: str | Path, answers: dict | None = None) -> tuple[bool, list
         fact(str(answers["name"]) in text, "the boot file names you (%s)" % answers["name"])
     if answers.get("assistant_name"):
         fact(str(answers["assistant_name"]) in text, "the boot file names the assistant (%s)" % answers["assistant_name"])
-    left = [str(p.relative_to(out)) for p in list(out.rglob("*.md")) + list(out.rglob("*.json")) + list(out.rglob("*.py")) if "{{" in p.read_text(encoding="utf-8", errors="replace") and "__pycache__" not in p.parts and not p.name.startswith("test_") and p.name not in ("generate.py", "parity_test.py", "leak_scan.py")]
+    # Only .md and .json files are ever template-rendered (render() runs on templates/*.tpl and core/.claude/settings.json.tpl only --
+    # see _copy_core's docstring: "everything else is copied byte for byte"). A .py file under core/ can legitimately contain the literal
+    # string "{{" as part of its own code (a prompt template it builds, a placeholder-detector's own pattern list, etc.), so it is never a
+    # leftover-placeholder signal and must never be scanned here -- found live 2026-11-20 as a false positive on decide.py/sense_vault.py
+    # after a hand-maintained filename denylist (generate.py, parity_test.py, leak_scan.py) missed them; fixed by excluding the whole
+    # file type that is structurally never rendered, instead of adding a fourth and fifth name to that denylist.
+    left = [str(p.relative_to(out)) for p in list(out.rglob("*.md")) + list(out.rglob("*.json")) if "{{" in p.read_text(encoding="utf-8", errors="replace") and "__pycache__" not in p.parts and not p.name.startswith("test_")]
     fact(not left, "no unfilled {{placeholder}} anywhere" if not left else "unfilled placeholders in: " + ", ".join(left[:5]))
     for rel in ("vault/VAULT-INDEX.md", "vault/Active Priorities.md", "scripts/job_runner.py", "scripts/jobs.json", "scripts/send_gate.py", ".claude/settings.json"):
         fact((out / rel).is_file(), rel + " exists")
